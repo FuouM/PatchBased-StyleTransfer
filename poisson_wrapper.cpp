@@ -18,7 +18,7 @@ static PyObject* poisson_disk_sampling(PyObject* self, PyObject* args) {
         x_max[i] = (float)PyFloat_AsDouble(PyList_GetItem(x_max_obj, i));
     }
 
-    auto result = thinks::poisson_disk_sampling::PoissonDiskSampling<float, 2>(
+    auto result = thinks::poisson_disk_sampling::PoissonDiskSampling(
         radius, x_min, x_max, max_sample_attempts, seed);
 
     PyObject* py_result = PyList_New(result.size());
