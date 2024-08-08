@@ -1,6 +1,8 @@
 # PatchBased-StyleTransfer
 Few-Shot Patch-Based Training, easy.
 
+WORK IN PROGRESS!!!
+
 ## Setup
 
 `python.exe -m pip install .`
