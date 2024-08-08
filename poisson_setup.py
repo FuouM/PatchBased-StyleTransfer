@@ -3,7 +3,7 @@ import sys
 
 module = Extension(
     "poisson_disk_module",
-    sources=["poisson_wrapper.cpp"],
+    sources=["src/poisson_wrapper.cpp"],
     extra_compile_args=["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"],
 )
 
