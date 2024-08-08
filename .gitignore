@@ -2,6 +2,8 @@
 build
 .mypy_cache
 gauss/*.pyd
+tmp
+*.egg-info/
 
 # Prerequisites
 *.d
