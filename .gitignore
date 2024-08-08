@@ -1,5 +1,7 @@
 .vscode
 build
+.mypy_cache
+gauss/*.pyd
 
 # Prerequisites
 *.d
