@@ -4,7 +4,7 @@ import numpy
 
 module = Extension(
     "gaussian_mixture",
-    sources=["gaussian_mixture.cpp"],
+    sources=["src/gaussian_mixture.cpp"],
     include_dirs=[numpy.get_include()], 
     extra_compile_args=["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"],
 )

@@ -3,7 +3,7 @@ Few-Shot Patch-Based Training, easy.
 
 ## Setup
 
-1. Build gaussian_mixture_module: `python.exe gaussian_setup.py build_ext --inplace`
+1. Build gaussian_mixture_module: `python.exe gaussian_setup.py build_ext --build-lib gauss`
 
 `python.exe gaussian_setup.py clean --all`
 
