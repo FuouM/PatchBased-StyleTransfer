@@ -172,6 +172,8 @@ def train(
     patch_loader = DataLoader(train_dataset, 1, shuffle=True)
 
     last_loss = 0.0
+    last_g_losses = []
+    last_d_losses = []
 
     generator.train()
     perception_loss_model.train()
@@ -256,9 +258,15 @@ def train(
 
         last_loss = np.mean(g_losses)
         d_last_loss = np.mean(d_losses)
+        
+        last_g_losses.append(last_loss)
+        last_d_losses.append(d_last_loss)
+        
         pbar.set_description(
             f"Training epoch [{epoch}] G[{last_loss:.5f}] D[{d_last_loss:.5f}]"
         )
+    
+    return last_g_losses, last_d_losses
 
 
 def get_generator(cfg: dict, device):
