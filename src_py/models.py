@@ -406,21 +406,24 @@ class DiscriminatorN_IN(nn.Module):
 class PerceptualVGG19(nn.Module):
     def __init__(self, feature_layers, use_normalization=True, path=None):
         super(PerceptualVGG19, self).__init__()
-        if path is not None:
-            print(f"Loading pre-trained VGG19 model from {path}")
-            model = models.vgg19()
-            model.classifier = nn.Sequential(
-                nn.Linear(512 * 8 * 8, 4096),
-                nn.ReLU(True),
-                nn.Dropout(),
-                nn.Linear(4096, 4096),
-                nn.ReLU(True),
-                nn.Dropout(),
-                nn.Linear(4096, 40),
-            )
-            model.load_state_dict(torch.load(path))
-        else:
-            model = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
+        # if path is not None:
+        #     print(f"Loading pre-trained VGG19 model from {path}")
+        #     # model = models.vgg19()
+        #     model = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.IMAGENET1K_V1)
+        #     model.classifier = nn.Sequential(
+        #         nn.Linear(512 * 8 * 8, 4096),
+        #         nn.ReLU(True),
+        #         nn.Dropout(),
+        #         nn.Linear(4096, 4096),
+        #         nn.ReLU(True),
+        #         nn.Dropout(),
+        #         nn.Linear(4096, 40),
+        #     )
+        #     model.load_state_dict(torch.load(path))
+        # else:
+        #     # model = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
+
+        model = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.IMAGENET1K_V1)
         model.float()
         model.eval()
 

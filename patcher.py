@@ -88,6 +88,7 @@ class DatasetPatches_M(Dataset):
 
 #     return tensor
 
+
 def np_to_tensor(seq: list[np.ndarray]):
     # Convert from BGR to RGB
     rgb_seq = [np.ascontiguousarray(se[..., ::-1]) for se in seq]
@@ -153,7 +154,7 @@ def train(
     reconstruction_weight=4.0,
     adversarial_weight=0.5,
     batch_size=32,
-    patch_size=32
+    patch_size=32,
 ):
     train_dataset = DatasetPatches_M(
         org_frames=org_frames,
@@ -162,7 +163,7 @@ def train(
         msk_frames=None,
         flw_fwds=None,
         flw_bwds=None,
-        patch_size=patch_size
+        patch_size=patch_size,
     )
 
     gen = torch.Generator()
@@ -204,29 +205,33 @@ def train(
                     assert discriminator is not None
                     opt_discriminator.zero_grad()
 
+                    d_generated = generator.forward(input_batch)
+
+                    # how well can it label as fake?
+                    fake_pred = discriminator(d_generated)
+                    fake = torch.zeros_like(fake_pred)
+                    fake_loss = adversarial_criterion.forward(fake_pred, fake)
+
                     # how well can it label as real?
                     real_pred = discriminator.forward(gt_batch)
                     real = torch.ones_like(real_pred)
 
                     real_loss = adversarial_criterion.forward(real_pred, real)
 
-                    # how well can it label as fake?
-                    d_generated = generator.forward(input_batch)
-                    fake_pred = discriminator(d_generated)
-                    fake = torch.zeros_like(fake_pred)
-
-                    fake_loss = adversarial_criterion.forward(fake_pred, fake)
-
-                    discriminator_loss = (real_loss + fake_loss) / 2
+                    discriminator_loss = real_loss + fake_loss
                     discriminator_loss.backward()
                     opt_discriminator.step()
 
                     d_losses.append(discriminator_loss.item())
 
                 # Train generator
+                opt_generator.zero_grad()
                 generated = generator(input_batch)
+
+                ## Image Loss
                 image_loss = reconstruction_criterion.forward(generated, gt_batch)
 
+                ## Perceptual Loss
                 fake_features = perception_loss_model.forward(generated)
                 target_features = perception_loss_model.forward(gt_batch)
                 perception_loss = ((fake_features - target_features) ** 2).mean()
@@ -360,20 +365,36 @@ def cut_patches(
 
     return patches
 
-def reconstruct_image(patches: torch.Tensor, indices: torch.Tensor, original_shape: tuple):
-    C, H, W = original_shape
-    reconstructed_image = torch.zeros(C, H, W, device=patches.device)
 
-    patch_size = patches.shape[-1]
-    padding = (patches.shape[-1] - patch_size) // 2
+def reconstruct_image(
+    patches: torch.Tensor,
+    indices: torch.Tensor,
+    H: int,
+    W: int,
+    patch_size: int,
+    padding: int = 0,
+):
+    # Initialize an empty tensor for the reconstructed image
+    reconstructed = torch.zeros((patches.shape[1], H, W), device=patches.device)
+    count = torch.zeros((H, W), device=patches.device)
+
+    # Calculate the effective patch size including padding
+    patch_dim = patch_size + 2 * padding
 
     for i, (y, x) in enumerate(indices):
-        patch = patches[i]
-        y_start = max(0, y - padding)
-        y_end = min(H, y + patch_size + padding)
-        x_start = max(0, x - padding)
-        x_end = min(W, x + patch_size + padding)
+        # Calculate the region of the image that corresponds to the current patch
+        y_slice = slice(y, y + patch_dim)
+        x_slice = slice(x, x + patch_dim)
 
-        reconstructed_image[:, y_start:y_end, x_start:x_end] = patch[:, :y_end-y_start, :x_end-x_start]
+        # Add the current patch to the reconstructed image
+        reconstructed[:, y_slice, x_slice] += patches[i]
+        count[y_slice, x_slice] += 1
 
-    return reconstructed_image
+    # Normalize by the count to handle overlapping patches
+    reconstructed /= count.clamp(min=1)
+
+    # Remove padding by slicing the valid region
+    if padding > 0:
+        reconstructed = reconstructed[:, padding:-padding, padding:-padding]
+
+    return reconstructed
