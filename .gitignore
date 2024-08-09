@@ -4,6 +4,7 @@ build
 gauss/*.pyd
 tmp
 *.egg-info/
+__pycache__
 
 # Prerequisites
 *.d
