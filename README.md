@@ -26,7 +26,7 @@ Included is a Python wrapper for poisson_disk_sampling: `python.exe poisson_setu
 
 
 ```
-ffmpeg -framerate 24 -i image_%05d.png -c:v libx264rgb -pix_fmt rgb24 output.mp4
+ffmpeg -framerate 24 -i image_%05d.png -c:v libx264 -crf 5 -pix_fmt yuv420p output.mp4
 ```
 
 ## Credits

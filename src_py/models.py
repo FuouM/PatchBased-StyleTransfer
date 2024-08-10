@@ -88,6 +88,7 @@ class GeneratorJ(nn.Module):
         filters=(64, 128, 128, 128, 128, 64),
         input_channels=3,
         append_smoothers=False,
+        use_spectral_norm=False,
     ):
         super(GeneratorJ, self).__init__()
         self.input_size = input_size
@@ -109,7 +110,7 @@ class GeneratorJ(nn.Module):
         self.use_bias = use_bias
         self.resnet_blocks = resnet_blocks
         self.append_smoothers = append_smoothers
-
+        self.use_spectral_norm = use_spectral_norm
 
         self.resnets = nn.ModuleList()
         self.make_layers()
@@ -168,7 +169,7 @@ class GeneratorJ(nn.Module):
             self.conv_12 = nn.Sequential(
                 nn.Conv2d(filters[5], 3, kernel_size=1, stride=1, padding=0, bias=True),
                 # nn.Tanh(), #[-1, 1]
-                nn.Sigmoid() # According to the Lightning implementation, [0, 1]
+                nn.Sigmoid(),  # According to the Lightning implementation, [0, 1]
             )
         else:
             self.conv_12 = nn.Conv2d(
@@ -207,21 +208,26 @@ class GeneratorJ(nn.Module):
         nonlinearity,
     ):
         out = nn.Sequential()
-        out.add_module(
-            "conv",
-            nn.Conv2d(
-                in_channels=in_filters,
-                out_channels=out_filters,
-                kernel_size=size,
-                stride=stride,
-                padding=padding,
-                bias=bias,
-            ),
+
+        conv = nn.Conv2d(
+            in_channels=in_filters,
+            out_channels=out_filters,
+            kernel_size=size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
         )
+
+        if self.use_spectral_norm:
+            conv = spectral_norm(conv)
+
+        out.add_module("conv", conv)
+
         if norm_layer:
             out.add_module("normalization", norm_layer(num_features=out_filters))
         if nonlinearity:
             out.add_module("nonlinearity", nonlinearity)
+
         return out
 
     def resnet_block(
@@ -333,6 +339,8 @@ class DiscriminatorN_IN(nn.Module):
         noise_sigma=0.2,
         norm_layer="instance_norm",
         use_bias=True,
+        use_spectral_norm=False,
+        use_self_attention=False,
     ):
         super(DiscriminatorN_IN, self).__init__()
 
@@ -341,12 +349,19 @@ class DiscriminatorN_IN(nn.Module):
         self.noise_sigma = noise_sigma
         self.input_channels = input_channels
         self.use_bias = use_bias
+        self.use_spectral_norm = use_spectral_norm
+        self.use_self_attention = use_self_attention
 
         if norm_layer == "batch_norm":
             self.norm_layer = nn.BatchNorm2d
         else:
             self.norm_layer = nn.InstanceNorm2d
         self.net = self.make_net(n_layers, self.input_channels, 1, 4, 2, self.use_bias)
+
+        if self.use_self_attention:
+            self.self_attention = SelfAttention(
+                self.num_filters * 4
+            )  # Add after 2nd or 3rd conv layer
 
     def make_net(self, n, flt_in, flt_out=1, k=4, stride=2, bias=True):
         padding = 1
@@ -377,6 +392,10 @@ class DiscriminatorN_IN(nn.Module):
                     nn.LeakyReLU,
                 ),
             )
+            if (
+                l == 2 and self.use_self_attention
+            ):  # Add self-attention after 2nd conv layer
+                model.add_module("self_attention", self.self_attention)
 
         flt_mult_prev = flt_mult
         flt_mult = min(2**n, 8)
@@ -403,10 +422,10 @@ class DiscriminatorN_IN(nn.Module):
 
     def make_block(self, flt_in, flt_out, k, stride, padding, bias, norm, relu):
         m = nn.Sequential()
-        m.add_module(
-            "conv",
-            nn.Conv2d(flt_in, flt_out, k, stride=stride, padding=padding, bias=bias),
-        )
+        conv = nn.Conv2d(flt_in, flt_out, k, stride=stride, padding=padding, bias=bias)
+        if self.use_spectral_norm:
+            conv = spectral_norm(conv)
+        m.add_module("conv", conv)
         if norm is not None:
             m.add_module("norm", norm(flt_out))
         if relu is not None:
@@ -418,6 +437,26 @@ class DiscriminatorN_IN(nn.Module):
             noise = torch.randn_like(x) * self.noise_sigma
             x = x + noise
         return self.net(x)
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(SelfAttention, self).__init__()
+        self.query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        batch_size, C, width, height = x.size()
+        query = self.query(x).view(batch_size, -1, width * height).permute(0, 2, 1)
+        key = self.key(x).view(batch_size, -1, width * height)
+        energy = torch.bmm(query, key)
+        attention = torch.softmax(energy, dim=-1)
+        value = self.value(x).view(batch_size, -1, width * height)
+        out = torch.bmm(value, attention.permute(0, 2, 1))
+        out = out.view(batch_size, C, width, height)
+        return self.gamma * out + x
 
 
 #####
@@ -464,7 +503,6 @@ class PerceptualVGG19(nn.Module):
         x = (x + 1) / 2
         return (x - self.mean_tensor) / self.std_tensor
 
-    
     def run(self, x):
         features = []
 

@@ -8,6 +8,7 @@ generator: &generator_j
     resnet_blocks: 7
     filters: [32, 64, 128, 128, 128, 64]
     input_channels: 3
+    use_spectral_norm: True
 
 
 # Optimizer of Generator
@@ -25,6 +26,8 @@ discriminator: &discriminatorn
   args:
     num_filters: 12
     n_layers: 2
+    use_spectral_norm: True
+    use_self_attention: True
 
 
 # Optimizer of Discriminator
