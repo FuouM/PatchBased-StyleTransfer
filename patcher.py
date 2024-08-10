@@ -189,8 +189,9 @@ def train(
 
     scaler = amp.GradScaler()
     torch.backends.cudnn.benchmark = True
-
-    # perception_loss_model = torch.jit.script(perception_loss_model)
+    torch.backends.cudnn.enabled = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     for epoch in (pbar := tqdm.tqdm(range(num_epochs))):
         g_losses = []
@@ -216,6 +217,7 @@ def train(
                 image_loss = 0
                 perception_loss = 0
                 adversarial_loss = 0
+                feature_loss = 0
 
                 # Train discriminator
                 if use_adversarial_loss:
@@ -226,17 +228,17 @@ def train(
                         d_generated = generator.forward(input_batch)
 
                         # how well can it label as fake?
-                        fake_pred = discriminator(d_generated)
+                        fake_pred, fake_feats = discriminator(d_generated)
                         fake = torch.zeros_like(fake_pred)
                         fake_loss = adversarial_criterion.forward(fake_pred, fake)
 
                         # how well can it label as real?
-                        real_pred = discriminator.forward(gt_batch)
+                        real_pred, real_feats = discriminator.forward(gt_batch)
                         real = torch.ones_like(real_pred)
 
                         real_loss = adversarial_criterion.forward(real_pred, real)
-
-                        discriminator_loss = real_loss + fake_loss
+                        feature_loss = get_feature_match_loss(real_feats, fake_feats)
+                        discriminator_loss = real_loss + fake_loss + feature_loss
                     # discriminator_loss.backward()
                     # opt_discriminator.step()
                     scaler.scale(discriminator_loss).backward()
@@ -270,11 +272,13 @@ def train(
 
                     if use_adversarial_loss:
                         # How good the generator is at fooling the discriminator
-                        fake_pred = discriminator(generated)
+                        fake_pred, _ = discriminator(generated)
                         adversarial_loss = adversarial_criterion(
                             fake_pred, torch.ones_like(fake_pred)
                         )
                         generator_loss += adversarial_weight * adversarial_loss
+                        
+                        
 
                 # generator_loss.backward()
                 # opt_generator.step()
@@ -299,6 +303,11 @@ def train(
 
     return last_g_losses, last_d_losses
 
+def get_feature_match_loss(real_features, fake_features):
+    loss = 0
+    for real_feat, fake_feat in zip(real_features, fake_features):
+        loss += torch.mean(torch.abs(real_feat - fake_feat))
+    return loss
 
 def get_generator(cfg: dict, device):
     generator = build_model(cfg["generator"]["type"], cfg["generator"]["args"], device)

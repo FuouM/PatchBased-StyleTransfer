@@ -1,3 +1,4 @@
+from typing import OrderedDict
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -89,6 +90,7 @@ class GeneratorJ(nn.Module):
         input_channels=3,
         append_smoothers=False,
         use_spectral_norm=False,
+        skip=True
     ):
         super(GeneratorJ, self).__init__()
         self.input_size = input_size
@@ -111,13 +113,13 @@ class GeneratorJ(nn.Module):
         self.resnet_blocks = resnet_blocks
         self.append_smoothers = append_smoothers
         self.use_spectral_norm = use_spectral_norm
+        self.skip = skip
 
         self.resnets = nn.ModuleList()
         self.make_layers()
 
         self.upconv2 = self.upconv_layer_upsample_and_conv(
-            in_filters=filters[3] + filters[2],
-            # in_filters=filters[3], # disable skip-connections
+            in_filters=filters[3] + filters[2] if self.skip else filters[3],
             out_filters=filters[4],
             size=4,
             stride=2,
@@ -128,8 +130,7 @@ class GeneratorJ(nn.Module):
         )
 
         self.upconv1 = self.upconv_layer_upsample_and_conv(
-            in_filters=filters[4] + filters[1],
-            # in_filters=filters[4],  # disable skip-connections
+            in_filters=filters[4] + filters[1] if self.skip else filters[4],
             out_filters=filters[4],
             size=4,
             stride=2,
@@ -141,8 +142,7 @@ class GeneratorJ(nn.Module):
 
         self.conv_11 = nn.Sequential(
             nn.Conv2d(
-                in_channels=filters[0] + filters[4] + input_channels,
-                # in_channels=filters[4],  # disable skip-connections
+                in_channels=filters[0] + filters[4] + input_channels if self.skip else filters[4],
                 out_channels=filters[5],
                 kernel_size=7,
                 stride=1,
@@ -177,22 +177,25 @@ class GeneratorJ(nn.Module):
             )
 
     def forward(self, x):
-        output_0 = self.conv0(x)
-        output_1 = self.conv1(output_0)
-        output = self.conv2(output_1)
-        output_2 = self.conv2(output_1)  # comment to disable skip-connections
+        output_0 = self.conv0(x) # [21, 32, 128, 128]
+        output_1 = self.conv1(output_0) # [21, 64, 64, 64]
+        output_2 = self.conv2(output_1)  # Store the output # [21, 128, 32, 32]
+        output = output_2  # comment to disable skip-connections # [21, 128, 32, 32]
         for layer in self.resnets:
             output = layer(output) + output
 
-        # output = self.upconv2(output)  # disable skip-connections
-        # output = self.upconv1(output)  # disable skip-connections
-        # output = self.conv_11(output)  # disable skip-connections
-        output = self.upconv2(torch.cat((output, output_2), dim=1))
-        output = self.upconv1(torch.cat((output, output_1), dim=1))
-        output = self.conv_11(torch.cat((output, output_0, x), dim=1))
+        if self.skip:
+            output = self.upconv2(torch.cat((output, output_2), dim=1)) # [21, 128, 32, 32]
+            output = self.upconv1(torch.cat((output, output_1), dim=1)) # [21, 128, 32, 32]
+            output = self.conv_11(torch.cat((output, output_0, x), dim=1)) # [21, 128, 32, 32]
+        else:
+            output = self.upconv2(output)  # disable skip-connections
+            output = self.upconv1(output)  # disable skip-connections
+            output = self.conv_11(output)  # disable skip-connections
 
         if self.append_smoothers:
             output = self.conv_11_a(output)
+            
         output = self.conv_12(output)
         return output
 
@@ -375,7 +378,6 @@ class DiscriminatorN_IN(nn.Module):
         )
 
         flt_mult, flt_mult_prev = 1, 1
-        # n - 1 blocks
         for l in range(1, n):
             flt_mult_prev = flt_mult
             flt_mult = min(2 ** (l), 8)
@@ -392,9 +394,7 @@ class DiscriminatorN_IN(nn.Module):
                     nn.LeakyReLU,
                 ),
             )
-            if (
-                l == 2 and self.use_self_attention
-            ):  # Add self-attention after 2nd conv layer
+            if l == 2 and self.use_self_attention:
                 model.add_module("self_attention", self.self_attention)
 
         flt_mult_prev = flt_mult
@@ -421,22 +421,51 @@ class DiscriminatorN_IN(nn.Module):
         return model
 
     def make_block(self, flt_in, flt_out, k, stride, padding, bias, norm, relu):
-        m = nn.Sequential()
         conv = nn.Conv2d(flt_in, flt_out, k, stride=stride, padding=padding, bias=bias)
-        if self.use_spectral_norm:
-            conv = spectral_norm(conv)
-        m.add_module("conv", conv)
+        layers = [("conv", conv)]
+
         if norm is not None:
-            m.add_module("norm", norm(flt_out))
+            norm_layer = norm(flt_out)
+            layers.append(("norm", norm_layer))
+
         if relu is not None:
-            m.add_module("relu", relu(0.2, True))
-        return m
+            relu_layer = relu(0.2, inplace=True)
+            layers.append(("relu", relu_layer))
+
+        # Fuse layers if applicable
+        block = nn.Sequential(OrderedDict(layers))
+        return block
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_noise and self.training:
             noise = torch.randn_like(x) * self.noise_sigma
             x = x + noise
-        return self.net(x)
+
+        features = []
+        for layer in self.net:
+            x = layer(x)
+            features.append(x)
+        return x, features
+
+
+# class SelfAttention(nn.Module):
+#     def __init__(self, in_channels):
+#         super(SelfAttention, self).__init__()
+#         self.query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+#         self.key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+#         self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+#         self.gamma = nn.Parameter(torch.zeros(1))
+
+#     def forward(self, x):
+#         batch_size, C, width, height = x.size()
+#         query = self.query(x).view(batch_size, -1, width * height).permute(0, 2, 1)
+#         key = self.key(x).view(batch_size, -1, width * height)
+#         energy = torch.bmm(query, key)
+#         attention = torch.softmax(energy, dim=-1)
+#         value = self.value(x).view(batch_size, -1, width * height)
+#         out = torch.bmm(value, attention.permute(0, 2, 1))
+#         out = out.view(batch_size, C, width, height)
+#         return self.gamma * out + x
 
 
 class SelfAttention(nn.Module):
@@ -446,16 +475,39 @@ class SelfAttention(nn.Module):
         self.key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
         self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
+        self.flash = hasattr(
+            torch.nn.functional, "scaled_dot_product_attention"
+        )  # Check for FlashAttention support
 
     def forward(self, x):
         batch_size, C, width, height = x.size()
+
+        # Linear projections
         query = self.query(x).view(batch_size, -1, width * height).permute(0, 2, 1)
         key = self.key(x).view(batch_size, -1, width * height)
-        energy = torch.bmm(query, key)
-        attention = torch.softmax(energy, dim=-1)
         value = self.value(x).view(batch_size, -1, width * height)
-        out = torch.bmm(value, attention.permute(0, 2, 1))
-        out = out.view(batch_size, C, width, height)
+
+        if self.flash:
+            # FlashAttention for efficient computation
+            attention = torch.nn.functional.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=None,  # Add an attention mask if needed
+                dropout_p=0.0 if self.training else 0.0,  # No dropout for inference
+            )
+        else:
+            # Fallback to manual implementation
+            energy = torch.bmm(query, key)
+            attention = torch.softmax(energy, dim=-1)
+            if self.training:
+                attention = torch.nn.functional.dropout(
+                    attention, p=0.1
+                )  # Apply dropout during training
+            attention = torch.bmm(attention, value)
+
+        # Reshape the output
+        out = attention.view(batch_size, C, width, height)
         return self.gamma * out + x
 
 
