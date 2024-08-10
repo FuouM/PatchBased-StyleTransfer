@@ -24,6 +24,13 @@ From observations it seems like patch-based is better for foreground objects, wh
 
 Included is a Python wrapper for poisson_disk_sampling: `python.exe poisson_setup.py build_ext --inplace`
 
+
+```
+ffmpeg -framerate 24 -i image_%05d.png -c:v libx264rgb -pix_fmt rgb24 output.mp4
+```
+
+## Credits
+
 https://github.com/thinks/poisson-disk-sampling
 
 ```

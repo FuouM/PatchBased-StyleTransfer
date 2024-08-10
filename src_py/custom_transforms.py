@@ -22,17 +22,10 @@ def blur_mask(tensor):
     return torch.FloatTensor(smoothed)
 
 
-def build_transform(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), mask=False):
-    # if type(image_size) != tuple:
-    # image_size = (image_size, image_size)
+def build_transform(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)):
     t = [
-        # transforms.Resize((image_size[0], image_size[1])),
-        # to_rgb,
-        # transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ]
-    if mask:
-        t.append(blur_mask)
     return transforms.Compose(t)
 
 

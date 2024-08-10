@@ -1,13 +1,16 @@
-import yaml
-import torch
 import os
+
 import numpy as np
+import torch
+import torch.cuda.amp as amp
+import torchvision.transforms.functional as tv_F
+import tqdm
+import yaml
 from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset
+
 from src_py import models
 from src_py.custom_transforms import build_transform
-import torchvision.transforms.functional as tv_F
-from torch.utils.data import Dataset, DataLoader
-import tqdm
 
 # with open(cfg_path, "r") as f:
 #     job_description = yaml.full_load(f)
@@ -32,6 +35,8 @@ class DatasetPatches_M(Dataset):
         self.transform = build_transform()
         self.org_frames = org_frames
         self.stl_frames = stl_frames
+        # self.org_frames = self.transform(org_frames)
+        # self.stl_frames = self.transform(stl_frames)
         self.stl_indices = stl_indices
         self.msk_frames = msk_frames
         self.flw_fwds = flw_fwds
@@ -80,15 +85,6 @@ class DatasetPatches_M(Dataset):
         return input_patches, gt_patches
 
 
-# def np_to_tensor(seq: list[np.ndarray]):
-#     # [H, W, C]
-#     ts = [torch.from_numpy(se / 255.0).permute(2, 0, 1).unsqueeze(0) for se in seq]
-#     # [1, C, H, W]
-#     tensor = torch.cat(ts, dim=0).float()  # [B, C, H, W]
-
-#     return tensor
-
-
 def np_to_tensor(seq: list[np.ndarray]):
     # Convert from BGR to RGB
     rgb_seq = [np.ascontiguousarray(se[..., ::-1]) for se in seq]
@@ -124,6 +120,9 @@ def init_model(job_description: dict, device):
 
     reconstruction_criterion, adversarial_criterion = get_criterion(cfg)
 
+    # generator = torch.jit.script(generator)
+    # discriminator = torch.jit.script(discriminator)
+
     return (
         generator,
         opt_generator,
@@ -148,13 +147,16 @@ def train(
     reconstruction_criterion: torch.nn.L1Loss,
     adversarial_criterion: torch.nn.MSELoss,
     device,
-    num_epochs=50_000_000,
+    num_epochs=1_000,
     seed=0,
     perception_loss_weight=6.0,
     reconstruction_weight=4.0,
     adversarial_weight=0.5,
-    batch_size=32,
-    patch_size=32,
+    batch_size=40,
+    patch_size=36,
+    add_rand_noise=False,
+    rand_noise_wgt=0.001,
+    use_adversarial_loss=True,
 ):
     train_dataset = DatasetPatches_M(
         org_frames=org_frames,
@@ -169,21 +171,28 @@ def train(
     gen = torch.Generator()
     gen.manual_seed(seed)
 
-    patch_loader = DataLoader(train_dataset, 1, shuffle=True)
+    patch_loader = DataLoader(train_dataset, 1, shuffle=True, pin_memory=True)
 
     last_loss = 0.0
     last_g_losses = []
     last_d_losses = []
 
     generator.train()
-    perception_loss_model.train()
+    perception_loss_model.eval()
 
-    use_adversarial_loss = False
-    if discriminator is not None:
+    # use_adversarial_loss = False
+    if discriminator is not None and use_adversarial_loss:
         use_adversarial_loss = True
         discriminator.train()
+    else:
+        use_adversarial_loss = False
 
-    for epoch in (pbar := tqdm.tqdm(range(num_epochs + 1))):
+    scaler = amp.GradScaler()
+    torch.backends.cudnn.benchmark = True
+
+    # perception_loss_model = torch.jit.script(perception_loss_model)
+
+    for epoch in (pbar := tqdm.tqdm(range(num_epochs))):
         g_losses = []
         d_losses = []
         for i, (input_patches, gt_patches) in enumerate(patch_loader):
@@ -193,10 +202,16 @@ def train(
                 gt_patches.squeeze().to(device),
             )
 
-            # Split the tensors into batches of size 16
+            if add_rand_noise:
+                gt_patches += (
+                    torch.randn_like(gt_patches, device=device) * rand_noise_wgt
+                )
+
+            # Split the tensors into batches of size 40
             input_batches = torch.split(input_patches, batch_size)
             gt_batches = torch.split(gt_patches, batch_size)
-
+            g_loss = 0
+            d_loss = 0
             for input_batch, gt_batch in zip(input_batches, gt_batches):
                 image_loss = 0
                 perception_loss = 0
@@ -204,68 +219,84 @@ def train(
 
                 # Train discriminator
                 if use_adversarial_loss:
-                    assert discriminator is not None
-                    opt_discriminator.zero_grad()
+                    with amp.autocast():
+                        assert discriminator is not None
+                        opt_discriminator.zero_grad()
 
-                    d_generated = generator.forward(input_batch)
+                        d_generated = generator.forward(input_batch)
 
-                    # how well can it label as fake?
-                    fake_pred = discriminator(d_generated)
-                    fake = torch.zeros_like(fake_pred)
-                    fake_loss = adversarial_criterion.forward(fake_pred, fake)
+                        # how well can it label as fake?
+                        fake_pred = discriminator(d_generated)
+                        fake = torch.zeros_like(fake_pred)
+                        fake_loss = adversarial_criterion.forward(fake_pred, fake)
 
-                    # how well can it label as real?
-                    real_pred = discriminator.forward(gt_batch)
-                    real = torch.ones_like(real_pred)
+                        # how well can it label as real?
+                        real_pred = discriminator.forward(gt_batch)
+                        real = torch.ones_like(real_pred)
 
-                    real_loss = adversarial_criterion.forward(real_pred, real)
+                        real_loss = adversarial_criterion.forward(real_pred, real)
 
-                    discriminator_loss = real_loss + fake_loss
-                    discriminator_loss.backward()
-                    opt_discriminator.step()
+                        discriminator_loss = real_loss + fake_loss
+                    # discriminator_loss.backward()
+                    # opt_discriminator.step()
+                    scaler.scale(discriminator_loss).backward()
+                    scaler.step(opt_discriminator)
 
-                    d_losses.append(discriminator_loss.item())
+                    d_loss = discriminator_loss.item()
+                    d_losses.append(d_loss)
 
                 # Train generator
+
                 opt_generator.zero_grad()
-                generated = generator(input_batch)
 
-                ## Image Loss
-                image_loss = reconstruction_criterion.forward(generated, gt_batch)
+                with amp.autocast():
+                    generated = generator(input_batch)
 
-                ## Perceptual Loss
-                fake_features = perception_loss_model.forward(generated)
-                target_features = perception_loss_model.forward(gt_batch)
-                perception_loss = ((fake_features - target_features) ** 2).mean()
+                    ## Image Loss
+                    image_loss = reconstruction_criterion.forward(generated, gt_batch)
 
-                generator_loss = (
-                    reconstruction_weight * image_loss
-                    + perception_loss_weight * perception_loss
-                )
-
-                if use_adversarial_loss:
-                    # How good the generator is at fooling the discriminator
-                    fake_pred = discriminator(generated)
-                    adversarial_loss = adversarial_criterion(
-                        fake_pred, torch.ones_like(fake_pred)
+                    ## Perceptual Loss
+                    fake_features = perception_loss_model.forward(generated)
+                    target_features = perception_loss_model.forward(gt_batch).detach()
+                    # perception_loss = ((fake_features - target_features) ** 2).mean()
+                    perception_loss = reconstruction_criterion.forward(
+                        fake_features, target_features
                     )
-                    generator_loss += adversarial_weight * adversarial_loss
 
-                generator_loss.backward()
-                opt_generator.step()
+                    generator_loss = (
+                        reconstruction_weight * image_loss
+                        + perception_loss_weight * perception_loss
+                    )
 
-                g_losses.append(generator_loss.item())
+                    if use_adversarial_loss:
+                        # How good the generator is at fooling the discriminator
+                        fake_pred = discriminator(generated)
+                        adversarial_loss = adversarial_criterion(
+                            fake_pred, torch.ones_like(fake_pred)
+                        )
+                        generator_loss += adversarial_weight * adversarial_loss
+
+                # generator_loss.backward()
+                # opt_generator.step()
+
+                scaler.scale(generator_loss).backward()
+                scaler.step(opt_generator)
+                scaler.update()
+
+                g_loss = generator_loss.item()
+
+                g_losses.append(g_loss)
 
         last_loss = np.mean(g_losses)
         d_last_loss = np.mean(d_losses)
-        
+
         last_g_losses.append(last_loss)
         last_d_losses.append(d_last_loss)
-        
+
         pbar.set_description(
             f"Training epoch [{epoch}] G[{last_loss:.5f}] D[{d_last_loss:.5f}]"
         )
-    
+
     return last_g_losses, last_d_losses
 
 
@@ -325,7 +356,7 @@ def build_model(model_type, args, device):
 
 
 def build_optimizer(opt_type, model, args):
-    assert opt_type in ["Adam"]
+    assert opt_type in ["Adam", "AdamW"]
     args["params"] = model.parameters()
     opt_class = getattr(torch.optim, opt_type)
     return opt_class(**args)

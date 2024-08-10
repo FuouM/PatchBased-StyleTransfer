@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from torchvision import models
+from torch.nn.utils import spectral_norm
 
 
 class UpsamplingLayer(nn.Module):
@@ -19,6 +20,63 @@ class UpsamplingLayer(nn.Module):
 # there are 2 conv layers inside conv_11_a
 # * means is optional, model uses skip-connections
 class GeneratorJ(nn.Module):
+    def make_layers(self):
+        sizes = [
+            7,
+            3,
+            3,
+        ]
+        strides = [
+            1,
+            2,
+            2,
+        ]
+        paddings = [
+            3,
+            1,
+            1,
+        ]
+        in_filters = [
+            self.input_channels,
+            self.filters[0],
+            self.filters[1],
+        ]
+        out_filters = [
+            self.filters[0],
+            self.filters[1],
+            self.filters[2],
+        ]
+
+        for i in range(3):
+            setattr(
+                self,
+                f"conv{i}",
+                self.relu_layer(
+                    in_filters=in_filters[i],
+                    out_filters=out_filters[i],
+                    size=sizes[i],
+                    stride=strides[i],
+                    padding=paddings[i],
+                    bias=self.use_bias,
+                    norm_layer=self.norm_layer,
+                    nonlinearity=nn.LeakyReLU(0.2),
+                ),
+            )
+
+        for i in range(self.resnet_blocks):
+            self.resnets.append(
+                self.resnet_block(
+                    in_filters=self.filters[2],
+                    out_filters=self.filters[2],
+                    size=3,
+                    stride=1,
+                    padding=1,
+                    bias=self.use_bias,
+                    norm_layer=self.norm_layer,
+                    nonlinearity=nn.ReLU(),
+                )
+            )
+
     def __init__(
         self,
         input_size=256,
@@ -45,58 +103,16 @@ class GeneratorJ(nn.Module):
             self.norm_layer = nn.BatchNorm2d
         elif norm_layer == "instance_norm":
             self.norm_layer = nn.InstanceNorm2d
+        self.input_channels = input_channels
+        self.filters = filters
         self.gpu_ids = gpu_ids
         self.use_bias = use_bias
         self.resnet_blocks = resnet_blocks
         self.append_smoothers = append_smoothers
 
-        self.conv0 = self.relu_layer(
-            in_filters=input_channels,
-            out_filters=filters[0],
-            size=7,
-            stride=1,
-            padding=3,
-            bias=self.use_bias,
-            norm_layer=self.norm_layer,
-            nonlinearity=nn.LeakyReLU(0.2),
-        )
-
-        self.conv1 = self.relu_layer(
-            in_filters=filters[0],
-            out_filters=filters[1],
-            size=3,
-            stride=2,
-            padding=1,
-            bias=self.use_bias,
-            norm_layer=self.norm_layer,
-            nonlinearity=nn.LeakyReLU(0.2),
-        )
-
-        self.conv2 = self.relu_layer(
-            in_filters=filters[1],
-            out_filters=filters[2],
-            size=3,
-            stride=2,
-            padding=1,
-            bias=self.use_bias,
-            norm_layer=self.norm_layer,
-            nonlinearity=nn.LeakyReLU(0.2),
-        )
 
         self.resnets = nn.ModuleList()
-        for i in range(self.resnet_blocks):
-            self.resnets.append(
-                self.resnet_block(
-                    in_filters=filters[2],
-                    out_filters=filters[2],
-                    size=3,
-                    stride=1,
-                    padding=1,
-                    bias=self.use_bias,
-                    norm_layer=self.norm_layer,
-                    nonlinearity=nn.ReLU(),
-                )
-            )
+        self.make_layers()
 
         self.upconv2 = self.upconv_layer_upsample_and_conv(
             in_filters=filters[3] + filters[2],
@@ -151,7 +167,8 @@ class GeneratorJ(nn.Module):
         if tanh:
             self.conv_12 = nn.Sequential(
                 nn.Conv2d(filters[5], 3, kernel_size=1, stride=1, padding=0, bias=True),
-                nn.Tanh(),
+                # nn.Tanh(), #[-1, 1]
+                nn.Sigmoid() # According to the Lightning implementation, [0, 1]
             )
         else:
             self.conv_12 = nn.Conv2d(
@@ -396,8 +413,11 @@ class DiscriminatorN_IN(nn.Module):
             m.add_module("relu", relu(0.2, True))
         return m
 
-    def forward(self, x):
-        return self.net(x)  # 2nd is class?
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_noise and self.training:
+            noise = torch.randn_like(x) * self.noise_sigma
+            x = x + noise
+        return self.net(x)
 
 
 #####
@@ -406,23 +426,7 @@ class DiscriminatorN_IN(nn.Module):
 class PerceptualVGG19(nn.Module):
     def __init__(self, feature_layers, use_normalization=True, path=None):
         super(PerceptualVGG19, self).__init__()
-        # if path is not None:
-        #     print(f"Loading pre-trained VGG19 model from {path}")
-        #     # model = models.vgg19()
-        #     model = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.IMAGENET1K_V1)
-        #     model.classifier = nn.Sequential(
-        #         nn.Linear(512 * 8 * 8, 4096),
-        #         nn.ReLU(True),
-        #         nn.Dropout(),
-        #         nn.Linear(4096, 4096),
-        #         nn.ReLU(True),
-        #         nn.Dropout(),
-        #         nn.Linear(4096, 40),
-        #     )
-        #     model.load_state_dict(torch.load(path))
-        # else:
-        #     # model = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
-
+        # model = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
         model = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.IMAGENET1K_V1)
         model.float()
         model.eval()
@@ -460,6 +464,7 @@ class PerceptualVGG19(nn.Module):
         x = (x + 1) / 2
         return (x - self.mean_tensor) / self.std_tensor
 
+    
     def run(self, x):
         features = []
 
